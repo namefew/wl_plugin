@@ -9,7 +9,15 @@ let needRefresh = false;
 let interval_id = null;
 let rooms = {}
 let bets = {}
-
+let timeout = 0;
+ chrome.storage.local.set({ 
+    test_bet_interval: 1,
+    last_bet_time:timeout
+}, () => {
+    if (chrome.runtime.lastError) {
+        console.error('持久化失败:', chrome.runtime.lastError);
+    }
+});
 chrome.storage.local.get(['rooms', 'bets'], function(items) {
         rooms = JSON.parse(items.rooms||'{}');
         bets = JSON.parse(items.bets||'{}');
@@ -59,7 +67,34 @@ let SID = (e => (e[e.HEARTBEATS = 1] = "HEARTBEATS",
     e[e.ROOM_LIST = 2999] = "ROOM_LIST",
     e))({});
 
+// rooms数据清理策略
+function pruneRoomsData(rooms) {
+    const MAX_HISTORY = 4; // 限制历史记录条目数
+    const cleaned = {...rooms};
+    
+    Object.entries(cleaned).forEach(([key, room]) => {
+        if(room.shoeHistory){
+            for(let i = room.shoeHistory.length - 1; i >= 0; i--){
+                let shoe = room.shoeHistory[i]
+                for(theRoundId in shoe){
+                    let round = shoe[theRoundId]
+                    if(round.startTime===undefined||(new Date().getTime() - shoe.startTime) > 24 * 3600 * 1000){
+                        delete shoe[theRoundId]
+                    }
+                }  
+            }
+        }
+        // 清理历史记录
+        if (room.shoeHistory && room.shoeHistory.length > MAX_HISTORY) {
+            cleaned[key].shoeHistory = room.shoeHistory.slice(-MAX_HISTORY);
+        }
+       
+    });
+    
+    return cleaned;
+}
 setInterval(() => {
+    rooms = pruneRoomsData(rooms);
     chrome.storage.local.set({ 
         rooms: JSON.stringify(rooms) 
     }, () => {
@@ -213,10 +248,19 @@ function clickWL(tabId) {
             if (nameElement && nameElement.parentNode && nameElement.parentNode.parentNode) {
                 const targetElement = nameElement.parentNode.parentNode.firstElementChild;
                 targetElement.click();
+                const popupConfirm = document.querySelector('.ui-dialog__confirm');
+                if (popupConfirm) {
+                    popupConfirm.click();
+                } 
                 console.log('成功点击WL真人');
                 return true;
             } else {
-                console.warn('未找到WL真人元素');
+                const firstEle = document.querySelector("div._vertical-bottom-name_1m2ul_30");3
+                if(firstEle){
+                    firstEle.click();
+                }else{
+                    console.warn('未找到第一个元素');
+                }
                 return false;
             }
         })()
@@ -280,9 +324,11 @@ function handleServerMessage(message) {
         const startTime = new Date().getTime();
         if(rooms[table_id]!==undefined){
             let room = rooms[table_id];
-            if(room.status===2 && room.lastOcr!==undefined && room.lastOcr.match){
+            let round = rooms[table_id].currentShoe[room.roundId];
+            let remainTime  = round.countdown - (new Date().getTime()-round.startTime);
+            if(room.status===2 && remainTime>=-1000 && remainTime <= 2000){
                 console.info("收到消息："+message);
-                console.info("可下注当前局：",room.roomId,room.roundId,room.currentShoe[room.roundId]);
+                console.info("可下注当前局：roomId="+room.roomId+"剩余时间："+remainTime,round);
                 rooms[table_id].currentShoe[room.roundId].bets={
                     card1: card1,
                     card2: card2,
@@ -297,7 +343,7 @@ function handleServerMessage(message) {
                 });
             }else{
                 console.info("收到消息："+message);
-                console.info("不可下注，状态："+(room.status===2)+" ,前一次识别匹配："+(room.lastOcr!==undefined && room.lastOcr.match))
+                console.info("不可下注，roomId="+room.roomId+"状态："+(room.status===2)+" ,剩余时间："+(remainTime))
             }
             room.lastOcr = {
                 card1: card1,
@@ -640,6 +686,20 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
                     round.userCount = data.userCount;
                     round.status = 2;//下注
                     round.startTime = Date.now();
+                    chrome.storage.local.get(['test_bet_interval','last_bet_time'], function(items) {
+                        let test_bet_interval = items.test_bet_interval||0;
+                        let last_bet_time = items.last_bet_time||0;
+                        if(test_bet_interval===0){
+                           let theTimeout = timeout++;
+                            setTimeout(()=>{
+                                let betAmount = 10;
+                                const script = 'console.info("'+roomId+' 最后 '+theTimeout+'毫秒下注:");handleTableMessage(' + roomId + ',' + 11 + ',' + 8 +',"' + roomId+'",' +Date.now()  + ',' + betAmount + ');';
+                                executeScriptInTabs(script);
+                            },data.countdown-theTimeout) 
+                        }else{
+                            console.info('最后下注间隔为：'+last_bet_time)
+                        }
+                    });
                 }else if(sid===SID.BACCARAT_STOP_BET){
                     room.status=3;
                     if(room.currentShoe[room.roundId]!==undefined)
@@ -667,7 +727,9 @@ chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
                     if(bets[data.carrier]!==undefined){
                         bets[data.carrier].success=data.success;
                         chrome.storage.local.set({ 
-                            bets: JSON.stringify(bets) 
+                            bets: JSON.stringify(bets) ,
+                            test_bet_interval: 1,
+                            last_bet_time:timeout
                         }, () => {
                             if (chrome.runtime.lastError) {
                                 console.error('持久化失败:', chrome.runtime.lastError);
